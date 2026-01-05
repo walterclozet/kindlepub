@@ -17,6 +17,10 @@ Ensure you have Python 3 and the Pillow library installed:
 ```bash
 pip install Pillow
 ```
+or
+```bash
+pip install -r requirements.txt
+```
 
 ## Usage
 ```bash

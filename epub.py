@@ -15,42 +15,40 @@ def get_default_threads():
     return count - 1 if count and count > 1 else 1
 
 def parse_xml_content(content):
-    """解析 ComicInfo.xml 的字节流"""
+    """解析 ComicInfo.xml 字节流"""
     info = {'title': None, 'author': None}
     try:
         root = ET.fromstring(content)
         info['title'] = root.findtext('Title')
         info['author'] = root.findtext('Writer')
-    except:
-        pass
+    except: pass
     return info
 
 def get_metadata_preflight(input_path, user_title, user_author):
-    """【解压前预检】确定书名和作者"""
+    """【核心逻辑】在解压前预取元数据，必要时询问"""
     final_title, final_author = user_title, user_author
     xml_info = {'title': None, 'author': None}
-
-    # 1. 尝试从文件夹或 ZIP 目录中偷窥 ComicInfo.xml
+    
+    # 支持 CBZ 和 ZIP
+    is_archive = os.path.isfile(input_path) and input_path.lower().endswith(('.cbz', '.zip'))
+    
     if os.path.isdir(input_path):
         xml_path = os.path.join(input_path, 'ComicInfo.xml')
         if os.path.exists(xml_path):
-            with open(xml_path, 'rb') as f:
-                xml_info = parse_xml_content(f.read())
-    elif os.path.isfile(input_path) and input_path.lower().endswith('.zip'):
+            with open(xml_path, 'rb') as f: xml_info = parse_xml_content(f.read())
+    elif is_archive:
         try:
             with zipfile.ZipFile(input_path, 'r') as z:
                 if 'ComicInfo.xml' in z.namelist():
                     xml_info = parse_xml_content(z.read('ComicInfo.xml'))
-        except:
-            pass
+        except: pass
 
-    # 2. 优先级合并
     if not final_title: final_title = xml_info['title']
     if not final_author: final_author = xml_info['author']
 
-    # 3. 交互询问逻辑
     if not final_title or not final_author:
         print("\n--- 补充书籍元数据 ---")
+        # 默认书名取文件名（去掉 .cbz 或 .zip）
         default_name = os.path.splitext(os.path.basename(input_path.rstrip(os.sep)))[0]
         if not final_title:
             val = input(f"请输入书名 (回车使用默认: {default_name}): ").strip()
@@ -59,21 +57,19 @@ def get_metadata_preflight(input_path, user_title, user_author):
             val = input(f"请输入作者 (回车使用默认: Unknown): ").strip()
             final_author = val if val else "Unknown"
         print("--------------------\n")
-
     return final_title, final_author
 
 def process_single_image(args):
-    """处理单张图片逻辑：裁边(选配) -> 缩放(强制) -> 转换"""
+    """处理单张图片：裁边 -> 缩放 -> 转换"""
     img_path, i, do_crop = args
     try:
         img = Image.open(img_path)
-        # 只有显式加了 --crop 才执行
         if do_crop:
             if img.mode != 'RGB': img = img.convert('RGB')
             bbox = img.getbbox()
             if bbox: img = img.crop(bbox)
 
-        # 高度限制在 2048px，使用高质量 LANCZOS
+        # 高度限制在 2048px
         MAX_HEIGHT = 2048
         if img.height > MAX_HEIGHT:
             ratio = MAX_HEIGHT / float(img.height)
@@ -81,49 +77,37 @@ def process_single_image(args):
 
         img_io = BytesIO()
         ext = os.path.splitext(img_path)[1].lower()
-        save_format = 'JPEG' if ext in ('.jpg', '.jpeg') else 'PNG'
+        save_format = 'JPEG' if ext in ('.jpg', '.jpeg', '.webp') else 'PNG'
         img.save(img_io, format=save_format, quality=85)
-        
         return {
-            'index': i, 
-            'filename': f"image_{i:04d}.{save_format.lower()}",
-            'data': img_io.getvalue(), 
-            'media_type': f"image/{'jpeg' if save_format=='JPEG' else 'png'}"
+            'index': i, 'filename': f"image_{i:04d}.{save_format.lower()}",
+            'data': img_io.getvalue(), 'media_type': f"image/{'jpeg' if save_format=='JPEG' else 'png'}"
         }
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e: return f"Error: {e}"
 
 def create_epub(input_path, output_file, do_crop, max_workers, user_title, user_author):
-    # 第一步：解压前预检
+    # 第一步：预检（CBZ/ZIP 无需解压即可获取书名）
     final_title, final_author = get_metadata_preflight(input_path, user_title, user_author)
-    
-    if not output_file:
-        output_file = f"{final_title}.epub"
+    if not output_file: output_file = f"{final_title}.epub"
 
     temp_dir = None
     try:
-        # 第二步：准备处理目录
-        if os.path.isfile(input_path) and input_path.lower().endswith('.zip'):
+        # 第二步：处理 CBZ/ZIP 归档或文件夹
+        if os.path.isfile(input_path) and input_path.lower().endswith(('.cbz', '.zip')):
             temp_dir = tempfile.mkdtemp()
-            print(f"[*] 正在解压资源...")
-            with zipfile.ZipFile(input_path, 'r') as z:
-                z.extractall(temp_dir)
+            print(f"[*] 正在处理归档文件 {os.path.basename(input_path)}...")
+            with zipfile.ZipFile(input_path, 'r') as z: z.extractall(temp_dir)
             process_dir = temp_dir
-        else:
-            process_dir = input_path
+        else: process_dir = input_path
 
-        # 第三步：图片处理
+        # 第三步：扫描并多线程处理图片
         exts = ('.jpg', '.jpeg', '.png', '.webp')
         files = sorted([os.path.join(process_dir, f) for f in os.listdir(process_dir) 
                        if f.lower().endswith(exts) and f.lower() != 'comicinfo.xml'])
-        
         total = len(files)
-        if total == 0:
-            print("[-] 错误: 未发现有效图片文件"); return
+        if total == 0: print("[-] 错误: 未发现图片"); return
 
-        print(f"[*] 书名: {final_title} | 作者: {final_author}")
-        print(f"[*] 正在转换 {total} 张图片 (线程: {max_workers}):")
-        
+        print(f"[*] 转换中: 《{final_title}》| 线程: {max_workers}")
         results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(process_single_image, (p, i, do_crop)) for i, p in enumerate(files)]
@@ -132,11 +116,10 @@ def create_epub(input_path, output_file, do_crop, max_workers, user_title, user_
                 if isinstance(res, dict): 
                     results.append(res)
                     print(f"\r    进度: [{len(results)}/{total}] {int(len(results)/total*100)}% ", end='', flush=True)
-                else:
-                    print(f"\n[!] {res}")
+                else: print(f"\n[!] {res}")
 
         # 第四步：封装 EPUB
-        print(f"\n[*] 正在生成 EPUB 文件...")
+        print(f"\n[*] 正在封装成 Kindle 优化版 EPUB...")
         results.sort(key=lambda x: x['index'])
         with zipfile.ZipFile(output_file, 'w', compression=zipfile.ZIP_DEFLATED) as epub:
             epub.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
@@ -147,7 +130,6 @@ def create_epub(input_path, output_file, do_crop, max_workers, user_title, user_
                 i = res['index']
                 img_href, xhtml_href = f"Images/{res['filename']}", f"Text/p_{i:04d}.xhtml"
                 epub.writestr(f"OEBPS/{img_href}", res['data'])
-                # CSS 保持 LoveLive 原版布局，不拉伸
                 html = f'<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><style>body{{margin:0;padding:0;background:#fff;}}img{{max-width:100%;max-height:100%;display:block;margin:auto;}}</style></head><body><img src="../{img_href}"/></body></html>'
                 epub.writestr(f"OEBPS/{xhtml_href}", html)
                 manifest.append(f'<item id="i{i}" href="{img_href}" media-type="{res["media_type"]}"/>')
@@ -158,39 +140,20 @@ def create_epub(input_path, output_file, do_crop, max_workers, user_title, user_
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="pub-id" version="3.0">
     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
         <dc:identifier id="pub-id">urn:uuid:{uuid.uuid4()}</dc:identifier>
-        <dc:title>{final_title}</dc:title>
-        <dc:creator>{final_author}</dc:creator>
-        <dc:language>zh</dc:language>
-        <meta property="rendition:layout">pre-paginated</meta>
+        <dc:title>{final_title}</dc:title><dc:creator>{final_author}</dc:creator>
+        <dc:language>zh</dc:language><meta property="rendition:layout">pre-paginated</meta>
     </metadata>
-    <manifest>{"".join(manifest)}</manifest>
-    <spine>{"".join(spine)}</spine>
+    <manifest>{"".join(manifest)}</manifest><spine>{"".join(spine)}</spine>
 </package>'''
             epub.writestr('OEBPS/content.opf', opf)
-        print(f"[+] 完成！文件保存在: {output_file}")
+        print(f"[+] 转换完成: {output_file}")
 
     finally:
         if temp_dir: shutil.rmtree(temp_dir)
 
-def show_guide():
-    print(f"""
-🚀 EPUB 画册快速生成工具
----------------------------------------
-用法: python3 epub.py [文件夹/ZIP] [输出路径] [参数]
-
-参数说明:
-  --title "书名"    --author "作者"
-  --crop           裁切白边 (默认关闭，保护原版排版)
-  --threads N      指定线程 (默认自动分配: {get_default_threads()})
-
-提示:
-  1. 支持 ComicInfo.xml 自动识别。
-  2. 若无元数据且未传参，会在解压前询问你。
----------------------------------------
-""")
-
 if __name__ == "__main__":
-    if len(sys.argv) == 1: show_guide(); sys.exit(0)
+    if len(sys.argv) == 1:
+        print("📖 KindlePub - 高性能 CBZ/图片转 EPUB 工具\n用法: python3 epub.py [CBZ/ZIP/目录] [输出路径] [参数]"); sys.exit(0)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("input_path")
     parser.add_argument("output_file", nargs='?')

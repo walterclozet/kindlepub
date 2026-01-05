@@ -11,5 +11,8 @@
 - **元数据智能提取**：支持 `ComicInfo.xml`，若缺失则提供交互式询问。
 - **Fixed Layout**：生成的 EPUB 3 为固定版式，完美适配 Kindle 官方推送服务。
 
+## 安装
+pip install -r requirements.txt
+
 ## 使用
 python3 epub.py [文件夹或ZIP/CBZ] [输出名]
