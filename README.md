@@ -1,5 +1,7 @@
 # KindlePub
 
+[English Version](./README_en.md) | 中文版
+
 高性能图片/CBZ 转 EPUB 转换器，专为 **Send to Kindle** 优化。
 
 ## 特色功能

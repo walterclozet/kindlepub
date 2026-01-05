@@ -1,3 +1,15 @@
 __pycache__/
 *.epub
 .vscode/
+
+# 建议增加：防止误传漫画原档
+*.zip
+*.cbz
+
+# 建议增加：Python 虚拟环境文件夹（如果你使用的话）
+.venv/
+env/
+venv/
+
+# 系统临时文件
+.DS_Store
